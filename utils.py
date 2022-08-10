@@ -14,13 +14,13 @@ def collate_fn(batch):
     for frame in batch:
         batched_pointclouds.append(torch.from_numpy(frame['pointcloud']))
         batched_gt_boxes.append(torch.from_numpy(frame['gt_boxes']))
-        batched_gt_labels.append(torch.from_numpy(frame['gt_labels']))
+        batched_gt_labels.append(frame['gt_labels'])
         batched_calibs.append(frame['calib'])
     return dict(
-        pointclouds=batched_pointclouds,
-        gt_boxes=batched_gt_boxes,
-        gt_labels=batched_gt_labels,
-        calibs=batched_calibs,
+        batched_pointclouds=batched_pointclouds,
+        batched_gt_boxes=batched_gt_boxes,
+        batched_gt_labels=batched_gt_labels,
+        batched_calibs=batched_calibs,
     )
 
 def camera_to_lidar(boxes, Tr_velo_to_cam, R0_rect):

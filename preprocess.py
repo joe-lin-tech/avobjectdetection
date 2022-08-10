@@ -96,8 +96,4 @@ def generate_dataset_info(root, mode):
     with open(os.path.join(root, f'dataset_{mode}_info.pkl'), 'wb') as f:
         pickle.dump(dataset_info, f)
     return dataset_info
-
-if __name__ == "__main__":
-    root = '/Volumes/G-DRIVE mobile/kitti'
-    mode = 'training'
-    dataset = generate_dataset_info(root, mode)
+    

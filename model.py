@@ -3,6 +3,61 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from anchors import AnchorGenerator
+from tqdm import tqdm
+import random
+import sys
+
+
+class Voxelization(nn.Module):
+    """
+    A class representing the voxelization layer
+
+    Attribute voxel_size: a list containing the voxel size
+    Attribute point_cloud_range: a list containing the point cloud range
+    Attribute max_num_points: maximum number of points per voxel
+    Attribute max_voxels: maximum number of voxels
+    """
+
+    def __init__(self, voxel_size, point_cloud_range, max_num_points, max_voxels):
+        """
+        Initializing Voxelization object
+
+        Parameter voxel_size: a list containing the voxel size
+        Parameter point_cloud_range: a list containing the point cloud range
+        Parameter max_num_points: maximum number of points per voxel
+        Parameter max_voxels: maximum number of voxels
+        """
+        super().__init__()
+        self.voxel_size = voxel_size
+        self.point_cloud_range = point_cloud_range
+        self.max_num_points = max_num_points
+        self.max_voxels = max_voxels
+
+    def forward(self, pointcloud):
+        """
+        Voxelization layer
+
+        Parameter pointcloud: point cloud data for a single frame
+        Return: point pillars, coordinates, number of points per pillar
+        """
+        pillars = {}
+        for point in tqdm(pointcloud, desc='Voxelization'):
+            pillar_coord = (point[0] // self.voxel_size[0], point[1] //
+                            self.voxel_size[1], point[2] // self.voxel_size[2])
+            if pillar_coord not in pillars:
+                pillars[pillar_coord] = point[None, :]
+            else:
+                pillars[pillar_coord] = torch.cat(
+                    (pillars[pillar_coord], point[None, :]), 0)
+        if len(pillars) > self.max_voxels:
+            randomized_keys = random.sample(list(pillars.keys()), self.max_voxels)
+            pillars = dict(zip(randomized_keys, [pillars[key] for key in randomized_keys]))
+        pillar_coords = torch.tensor(list(pillars.keys()))
+        num_points = torch.tensor(
+            [max(pillars[pillar_coord].shape[0], self.max_num_points) for pillar_coord in pillars])
+        pillars = torch.stack([F.pad(pillar, (0, 0, 0, self.max_num_points - len(pillar)), 'constant', 0) if len(
+            pillar) <= self.max_num_points else random.sample(pillar, self.max_num_points) for pillar in pillars.values()])
+        return pillars, pillar_coords, num_points
 
 
 class PillarLayer(nn.Module):
@@ -100,11 +155,12 @@ class PillarEncoder(nn.Module):
         offset_pc_center = batched_pillars[:, :, :3] - torch.sum(
             batched_pillars[:, :, :3], dim=1, keepdim=True) / batched_num_points[:, None, None]
         # offset_pc_center: (B * N, max_num_points, 3)
+
         # calculate offsets from pillar centers
-        offset_pillar_center_x = batched_pillars[:, :, 0] - (
+        offset_pillar_center_x = batched_pillars[:, :, :1] - (
             batched_pillar_coords[:, None, 1:2] * self.voxel_size[0] + self.voxel_size[0] / 2 + self.pointcloud_range[0])
         # offset_pillar_center_x: (B * N, max_num_points, 1)
-        offset_pillar_center_y = batched_pillars[:, :, 1] - (
+        offset_pillar_center_y = batched_pillars[:, :, 1:2] - (
             batched_pillar_coords[:, None, 2:3] * self.voxel_size[1] + self.voxel_size[1] / 2 + self.pointcloud_range[1])
         # offset_pillar_center_y: (B * N, max_num_points, 1)
 
@@ -112,8 +168,6 @@ class PillarEncoder(nn.Module):
         augmented_features = torch.cat(
             [batched_pillars, offset_pc_center, offset_pillar_center_x, offset_pillar_center_y], dim=-1)
         # augmented_features: (B * N, max_num_points, c + 5)
-
-        # TODO figure out why PointPillars mask is necessary here
 
         # calculate embedded feature
         augmented_features = augmented_features.permute(0, 2, 1).contiguous()
@@ -130,7 +184,10 @@ class PillarEncoder(nn.Module):
             batch_coords = batched_pillar_coords[batched_pillar_coords[:, 0] == i, :]
             batched_pillar_features[i, batch_coords[:, 0],
                                     batch_coords[:, 1]] = pillar_features[batch_coords]
+        batched_pillar_features = batched_pillar_features.permute(
+            0, 3, 2, 1).contiguous()
         # batched_pillar_features: (B, out_channels, (max_y - min_y) / voxel_size_y, (max_x - min_x) / voxel_size_x)
+        print('batched_pillar_features', batched_pillar_features.shape)
         return batched_pillar_features
 
 
@@ -330,11 +387,11 @@ class PointPillars(nn.Module):
             batch_size=2,
             feature_map_size=[248, 216],
             anchor_ranges=[[0, -39.68, -0.6, 69.12, 39.68, -0.6],
-                [0, -39.68, -0.6, 69.12, 39.68, -0.6],
-                [0, -39.68, -1.78, 69.12, 39.68, -1.78]],
+                           [0, -39.68, -0.6, 69.12, 39.68, -0.6],
+                           [0, -39.68, -1.78, 69.12, 39.68, -1.78]],
             anchor_sizes=[[0.6, 0.8, 1.73],
-                [0.6, 1.76, 1.73],
-                [1.6, 3.9, 1.56]],
+                          [0.6, 1.76, 1.73],
+                          [1.6, 3.9, 1.56]],
             anchor_rotations=[0, 1.57])
 
     def forward(self, batched_points):
@@ -358,6 +415,7 @@ class PointPillars(nn.Module):
         # cls_head: (B, num_anchors * num_classes, h, w)
         # reg_head: (B, num_anchors * 7, h, w)
         # dir_head: (B, num_anchors * 2, h, w)
-        anchors = self.anchor_generator.multiscale_anchors
-
+        anchors = self.anchor_generator.batched_multiscale_anchors
+        # anchors: (B, h, w, 2, 7)
+        self.anchor_generator.match_anchors()
         return batched_backbone_features
