@@ -6,6 +6,7 @@ from loss import PointPillarsLoss
 import torch
 from tqdm import tqdm
 
+
 def train_model(root, num_epochs, num_iters, batch_size):
     """
     Train PointPillars model on the KITTI dataset
@@ -17,7 +18,8 @@ def train_model(root, num_epochs, num_iters, batch_size):
     """
     # initialize dataset and dataloaders
     train_dataset = KITTIDataset(root, 'training')
-    train_dataloader = DataLoader(train_dataset, batch_size=2, shuffle=True, num_workers=4, collate_fn=collate_fn)
+    train_dataloader = DataLoader(
+        train_dataset, batch_size=2, shuffle=True, num_workers=4, collate_fn=collate_fn)
     # validation_dataset = KITTIDataset(root, 'validation')
     # test_dataset = KITTIDataset(root, 'testing')
     # test_dataloader = DataLoader(test_dataset, batch_size=1, shuffle=False, num_workers=4, collate_fn=collate_fn)
@@ -49,14 +51,33 @@ def train_model(root, num_epochs, num_iters, batch_size):
             # reset gradients
             optim.zero_grad()
             # forward pass
-            output = point_pillars(data['batched_pointclouds'])
+            cls_pred, reg_pred, dir_pred, anchor_match = point_pillars(
+                data['batched_pointclouds'], data['batched_gt_boxes'], data['batched_gt_labels'])
             # calculate loss
-            loss_value = loss(output, data['labels'])
+            batched_cls = anchor_match['batched_cls'].reshape(-1)
+            batched_reg = anchor_match['batched_reg'].reshape(-1, 7)
+            batched_dir = anchor_match['batched_dir'].reshape(-1)
+            batched_ambiguity = anchor_match['batched_ambiguity'].reshape(-1)
+
+            pos_flag = (batched_cls >= 0) & (batched_cls < 3)
+            reg_pred = reg_pred[pos_flag]
+            batched_reg = batched_reg[pos_flag]
+            dir_pred = dir_pred[pos_flag]
+            batched_dir = batched_dir[pos_flag]
+            # set unobserved classes to num_classes
+            batched_cls[batched_cls < 0] = 3
+            batched_cls = batched_cls[batched_ambiguity == 0]
+            cls_pred = cls_pred[batched_ambiguity == 0]
+
+            loss_values = loss(cls_pred, reg_pred, dir_pred,
+                               batched_cls, batched_reg, batched_dir)
             # backward pass
-            loss_value.backward()
+            total_loss = loss_values['total_loss']
+            total_loss.backward()
             # update weights
             optim.step()
-            print(f'Epoch {epoch + 1}/{num_epochs}, Iteration {i + 1}/{num_iters}, Loss: {loss_value.item():.4f}')
+            print(
+                f'Epoch {epoch + 1}/{num_epochs}, Iteration {i + 1}/{num_iters}, Loss: {loss_values["total_loss"]:.4f}, Classification Loss: {loss_values["cls_loss"]:.4f}, Regression Loss: {loss_values["reg_loss"]:.4f}, Direction Loss: {loss_values["dir_loss"]:.4f}')
             if i == num_iters:
                 break
         # scheduler.step()

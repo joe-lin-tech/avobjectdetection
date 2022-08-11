@@ -18,18 +18,18 @@ class Voxelization(nn.Module):
     Attribute max_voxels: maximum number of voxels
     """
 
-    def __init__(self, voxel_size, point_cloud_range, max_num_points, max_voxels):
+    def __init__(self, voxel_size, pointcloud_range, max_num_points, max_voxels):
         """
         Initializing Voxelization object
 
         Parameter voxel_size: a list containing the voxel size
-        Parameter point_cloud_range: a list containing the point cloud range
+        Parameter pointcloud_range: a list containing the point cloud range
         Parameter max_num_points: maximum number of points per voxel
         Parameter max_voxels: maximum number of voxels
         """
         super().__init__()
         self.voxel_size = voxel_size
-        self.point_cloud_range = point_cloud_range
+        self.pointcloud_range = pointcloud_range
         self.max_num_points = max_num_points
         self.max_voxels = max_voxels
 
@@ -42,17 +42,22 @@ class Voxelization(nn.Module):
         """
         pillars = {}
         for point in tqdm(pointcloud, desc='Voxelization'):
-            pillar_coord = (point[0] // self.voxel_size[0], point[1] //
-                            self.voxel_size[1], point[2] // self.voxel_size[2])
-            if pillar_coord not in pillars:
-                pillars[pillar_coord] = point[None, :]
-            else:
-                pillars[pillar_coord] = torch.cat(
-                    (pillars[pillar_coord], point[None, :]), 0)
+            if self.pointcloud_range[0] <= point[0] <= self.pointcloud_range[3] \
+                and self.pointcloud_range[1] <= point[1] <= self.pointcloud_range[4] \
+                    and self.pointcloud_range[2] <= point[2] <= self.pointcloud_range[5]:
+                pillar_coord = (point[0] // self.voxel_size[0], point[1] //
+                                self.voxel_size[1], point[2] // self.voxel_size[2])
+                if pillar_coord not in pillars:
+                    pillars[pillar_coord] = point[None, :]
+                else:
+                    pillars[pillar_coord] = torch.cat(
+                        (pillars[pillar_coord], point[None, :]), 0)
         if len(pillars) > self.max_voxels:
-            randomized_keys = random.sample(list(pillars.keys()), self.max_voxels)
-            pillars = dict(zip(randomized_keys, [pillars[key] for key in randomized_keys]))
-        pillar_coords = torch.tensor(list(pillars.keys()))
+            randomized_keys = random.sample(
+                list(pillars.keys()), self.max_voxels)
+            pillars = dict(
+                zip(randomized_keys, [pillars[key] for key in randomized_keys]))
+        pillar_coords = torch.tensor(list(pillars.keys())).long()
         num_points = torch.tensor(
             [max(pillars[pillar_coord].shape[0], self.max_num_points) for pillar_coord in pillars])
         pillars = torch.stack([F.pad(pillar, (0, 0, 0, self.max_num_points - len(pillar)), 'constant', 0) if len(
@@ -177,17 +182,16 @@ class PillarEncoder(nn.Module):
         # perform max pooling across the points in each pillar
         pillar_features = torch.max(embedded_features, dim=-1)[0]
 
-        batch_size = batched_pillar_coords[-1, 0] + 1
-        batched_pillar_features = torch.zeros((batch_size, (self.pointcloud_range[1] - self.pointcloud_range[0]) / self.voxel_size[0], (
-            self.pointcloud_range[3] - self.pointcloud_range[2]) / self.voxel_size[0]), self.out_channels, device=pillar_features.device)
+        batch_size = int((batched_pillar_coords[-1, 0] + 1).item())
+        batched_pillar_features = torch.zeros(batch_size, int((self.pointcloud_range[3] - self.pointcloud_range[0]) / self.voxel_size[0]), int(
+            (self.pointcloud_range[4] - self.pointcloud_range[1]) / self.voxel_size[0]), self.out_channels)
         for i in range(batch_size):
             batch_coords = batched_pillar_coords[batched_pillar_coords[:, 0] == i, :]
             batched_pillar_features[i, batch_coords[:, 0],
-                                    batch_coords[:, 1]] = pillar_features[batch_coords]
+                                    batch_coords[:, 1]] = pillar_features[batched_pillar_coords[:, 0] == i]
         batched_pillar_features = batched_pillar_features.permute(
             0, 3, 2, 1).contiguous()
         # batched_pillar_features: (B, out_channels, (max_y - min_y) / voxel_size_y, (max_x - min_x) / voxel_size_x)
-        print('batched_pillar_features', batched_pillar_features.shape)
         return batched_pillar_features
 
 
@@ -315,30 +319,30 @@ class DetectionHead(nn.Module):
 
     Attribute num_classes: number of classes to predict
     Attribute num_anchors: number of anchors to predict
-    Attribute num_input_features: number of input features
+    Attribute in_channels: number of channels in the input
     Attribute cls_conv: convolutional head for classification
     Attribute reg_conv: convolutional head for regression
     Attribute dir_conv: convolutional head for determining head
     """
 
-    def __init__(self, num_classes, num_anchors, num_input_features):
+    def __init__(self, num_classes, num_anchors, in_channels):
         """
         Initialize the detection head of PointPillars
 
         Parameter num_classes: number of classes to predict
         Parameter num_anchors: number of anchors to predict
-        Parameter num_input_features: number of input features
+        Parameter in_channels: number of channels in the input
         """
         super().__init__()
         self.num_classes = num_classes
         self.num_anchors = num_anchors
-        self.num_input_features = num_input_features
+        self.in_channels = in_channels
         self.cls_conv = nn.Conv2d(
-            self.num_input_features, self.num_anchors * self.num_classes, kernel_size=1)
+            self.in_channels, self.num_anchors * self.num_classes, kernel_size=1)
         self.reg_conv = nn.Conv2d(
-            self.num_input_features, self.num_anchors * 7, kernel_size=1)
+            self.in_channels, self.num_anchors * 7, kernel_size=1)
         self.dir_conv = nn.Conv2d(
-            self.num_input_features, self.num_anchors * 2, kernel_size=1)
+            self.in_channels, self.num_anchors * 2, kernel_size=1)
 
     def forward(self, batched_backbone_features):
         """
@@ -381,7 +385,7 @@ class PointPillars(nn.Module):
             voxel_size, pointcloud_range, in_channels=9, out_channels=64)
         self.backbone = Backbone(in_channels=64, out_channels=128)
         self.detection_head = DetectionHead(
-            num_classes=3, num_anchors=6, num_input_features=128)
+            num_classes=3, num_anchors=6, in_channels=384)
         # TODO remove hard-coded areas
         self.anchor_generator = AnchorGenerator(
             batch_size=2,
@@ -394,11 +398,16 @@ class PointPillars(nn.Module):
                           [1.6, 3.9, 1.56]],
             anchor_rotations=[0, 1.57])
 
-    def forward(self, batched_points):
+        self.thresholds = [{'pos_iou_thres': 0.5, 'neg_iou_thres': 0.35}, {
+            'pos_iou_thres': 0.5, 'neg_iou_thres': 0.35}, {'pos_iou_thres': 0.6, 'neg_iou_thres': 0.45}]
+
+    def forward(self, batched_points, batched_gt_boxes, batched_gt_labels):
         """
         Forward pass through the PointPillars neural network
 
         Parameter batched_points: (B, N, 3) tensor of points
+        Parameter batched_gt_boxes: (B, M, 7) tensor of ground truth boxes
+        Parameter batched_gt_labels: (B, M) tensor of ground truth labels
         """
         batched_pillars, batched_pillar_coords, batched_num_points = self.pillar_layer(
             batched_points)
@@ -415,7 +424,11 @@ class PointPillars(nn.Module):
         # cls_head: (B, num_anchors * num_classes, h, w)
         # reg_head: (B, num_anchors * 7, h, w)
         # dir_head: (B, num_anchors * 2, h, w)
+        cls_head = cls_head.permute(0, 2, 3, 1).reshape(-1, 3)
+        reg_head = reg_head.permute(0, 2, 3, 1).reshape(-1, 7)
+        dir_head = dir_head.permute(0, 2, 3, 1).reshape(-1, 2)
         anchors = self.anchor_generator.batched_multiscale_anchors
         # anchors: (B, h, w, 2, 7)
-        self.anchor_generator.match_anchors()
-        return batched_backbone_features
+        anchor_match = self.anchor_generator.match_anchors(
+            batched_gt_boxes=batched_gt_boxes, batched_gt_labels=batched_gt_labels, thresholds=self.thresholds, num_classes=3)
+        return cls_head, reg_head, dir_head, anchor_match

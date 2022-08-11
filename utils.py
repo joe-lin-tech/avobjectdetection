@@ -13,8 +13,8 @@ def collate_fn(batch):
     batched_calibs = []
     for frame in batch:
         batched_pointclouds.append(torch.from_numpy(frame['pointcloud']))
-        batched_gt_boxes.append(torch.from_numpy(frame['gt_boxes']))
-        batched_gt_labels.append(frame['gt_labels'])
+        batched_gt_boxes.append(torch.from_numpy(frame['gt_boxes']).type(dtype=torch.float32))
+        batched_gt_labels.append(torch.from_numpy(frame['gt_labels']))
         batched_calibs.append(frame['calib'])
     return dict(
         batched_pointclouds=batched_pointclouds,

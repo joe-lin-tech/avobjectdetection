@@ -1,4 +1,6 @@
 import torch
+from tqdm import tqdm
+import numpy as np
 
 
 class AnchorGenerator():
@@ -39,9 +41,9 @@ class AnchorGenerator():
         """
         # TODO check correct implementation of anchor generation
         centers_x = torch.linspace(
-            anchor_range[0], anchor_range[3], self.feature_map_size[0] - 1)
+            anchor_range[0], anchor_range[3], self.feature_map_size[0])
         centers_y = torch.linspace(
-            anchor_range[1], anchor_range[4], self.feature_map_size[1] - 1)
+            anchor_range[1], anchor_range[4], self.feature_map_size[1])
         rotations = torch.tensor(self.anchor_rotations)
         centers_x, centers_y, rotations = torch.meshgrid(
             centers_x, centers_y, rotations)
@@ -55,7 +57,7 @@ class AnchorGenerator():
         tiled_rotations = torch.tile(rotations, (self.batch_size, 1, 1, 1, 1))
         anchors = torch.stack((tiled_centers_x, tiled_centers_y, tiled_centers_z,
                                tiled_widths, tiled_lengths, tiled_heights, tiled_rotations), dim=-1)
-        return anchors
+        return anchors.permute(0, 2, 3, 1, 4, 5).contiguous()
 
     def generate_multiscale_anchors(self):
         """
@@ -69,7 +71,36 @@ class AnchorGenerator():
             # generate anchors for each scale
             multiscale_anchors.append(self.generate_anchors(
                 self.anchor_ranges[i], self.anchor_sizes[i]))
-        return torch.cat(multiscale_anchors, dim=2)
+        return torch.cat(multiscale_anchors, dim=3)
+
+    def limit_period(self, val, offset=0.5, period=np.pi):
+        """
+        Limit the value to the period
+
+        Parameter val: value to limit
+        Parameter offset: offset to add to the value
+        Parameter period: period to limit the value to
+        Return: the limited value
+        """
+        return val - torch.floor(val / period + offset) * period
+
+    def nearest_bev(self, boxes):
+        """
+        Find nearest anchor-matching box in birds-eye view
+
+        Parameter boxes: a tensor containing bounding boxes
+        Return: a tensor containing the nearest anchor-matching box in birds-eye view
+        """
+        boxes_bev = boxes[:, [0, 1, 3, 4]]
+        boxes_θ = self.limit_period(boxes[:, 6], 0.5, np.pi)
+        boxes_bev = torch.where(
+            torch.abs(boxes_θ[:, None]) < np.pi / 4, boxes_bev, boxes_bev[:, [0, 1, 3, 2]])
+
+        boxes_xy = boxes_bev[:, :2]
+        boxes_wl = boxes_bev[:, 2:]
+        boxes_bev = torch.cat(
+            [boxes_xy - boxes_wl / 2, boxes_xy + boxes_wl / 2], dim=1)
+        return boxes_bev
 
     def bev_iou(self, boxes1, boxes2):
         """
@@ -93,22 +124,52 @@ class AnchorGenerator():
         boxes_area = boxes_width * boxes_height
         # boxes_area: (N, M)
 
-        boxes1_area = (boxes1[:, 2] - boxes1[:, 0]) * (boxes1[:, 3] - boxes1[:, 1])
-        boxes2_area = (boxes2[:, 2] - boxes2[:, 0]) * (boxes2[:, 3] - boxes2[:, 1])
+        boxes1_area = (boxes1[:, 2] - boxes1[:, 0]) * \
+            (boxes1[:, 3] - boxes1[:, 1])
+        boxes2_area = (boxes2[:, 2] - boxes2[:, 0]) * \
+            (boxes2[:, 3] - boxes2[:, 1])
         # boxes1_area, boxes2_area: (M, )
 
         return boxes_area / (boxes1_area[:, None] + boxes2_area[None, :] - boxes_area)
 
-    def boxes_to_bev(self, boxes):
+    def boxes_to_bev_iou(self, boxes, anchors):
         """
         Convert boxes to bird's eye view
 
         Parameter boxes: a tensor containing the boxes
-        Return: a tensor containing the boxes in bird's eye view
+        Parameter anchors: a tensor containing the anchors
+        Return: a tensor containing the ious of the boxes in bird's eye view
         """
-        # TODO understand this projection process
-        
-        return
+        boxes_bev = self.nearest_bev(boxes)
+        anchors_bev = self.nearest_bev(anchors)
+        iou = self.bev_iou(boxes_bev, anchors_bev)
+        # iou: (N, M)
+        return iou
+
+    def boxes_to_deltas(self, boxes, anchors):
+        """
+        Convert boxes to deltas
+
+        Parameter boxes: a tensor containing the boxes
+        Parameter anchors: a tensor containing the anchors
+        Return: a tensor containing the deltas of the boxes
+        """
+        diagonal = torch.sqrt(anchors[:, 3] ** 2 + anchors[:, 4] ** 2)
+
+        delta_x = (boxes[:, 0] - anchors[:, 0]) / diagonal
+        delta_y = (boxes[:, 1] - anchors[:, 1]) / diagonal
+        delta_z = (boxes[:, 2] - anchors[:, 2]) / anchors[:, 5]
+
+        delta_w = torch.log(boxes[:, 3] / anchors[:, 3])
+        delta_l = torch.log(boxes[:, 4] / anchors[:, 4])
+        delta_h = torch.log(boxes[:, 5] / anchors[:, 5])
+
+        # delta_θ = boxes[:, 6] - anchors[:, 6]
+        delta_θ = torch.sin(boxes[:, 6] - anchors[:, 6])
+
+        deltas = torch.stack(
+            [delta_x, delta_y, delta_z, delta_w, delta_l, delta_h, delta_θ], dim=1)
+        return deltas
 
     def match_anchors(self, batched_gt_boxes, batched_gt_labels, thresholds, num_classes):
         """
@@ -120,10 +181,70 @@ class AnchorGenerator():
         Parameter num_classes: number of classes
         Return: a tensor containing the anchors matched to ground truth objects
         """
+        batched_multiscale_cls = []
+        batched_multiscale_reg = []
+        batched_multiscale_dir = []
+        batched_multiscale_ambiguity = []
         for gt_boxes, gt_labels, multiscale_anchors in zip(batched_gt_boxes, batched_gt_labels, self.batched_multiscale_anchors):
-            # TODO implement matching of anchors to ground truth objects
+            multiscale_cls = []
+            multiscale_reg = []
+            multiscale_dir = []
+            multiscale_ambiguity = []
             for i, threshold in enumerate(thresholds):
                 pos_iou, neg_iou = threshold['pos_iou_thres'], threshold['neg_iou_thres']
                 anchors = multiscale_anchors[:, :, i, :, :].reshape(-1, 7)
-                bev_anchors = self.boxes_to_bev(anchors)
-        return
+                bev_iou = self.boxes_to_bev_iou(gt_boxes, anchors)
+                max_anchor_iou, max_anchor_iou_idx = torch.max(bev_iou, dim=0)
+                max_gt_iou, _ = torch.max(bev_iou, dim=1)
+
+                assigned_gt_boxes = - \
+                    torch.ones((anchors.shape[0]), dtype=torch.long)
+                assigned_gt_boxes[max_anchor_iou < neg_iou] = 0
+
+                assigned_gt_boxes[max_anchor_iou >=
+                                  pos_iou] = max_anchor_iou_idx[max_anchor_iou >= pos_iou]
+
+                for j in range(gt_boxes.shape[0]):
+                    if max_gt_iou[j] >= neg_iou:
+                        assigned_gt_boxes[max_anchor_iou[j] == max_gt_iou[j]] = j
+
+                pos_flag = assigned_gt_boxes > 0
+                neg_flag = assigned_gt_boxes == 0
+
+                # assign anchor labels
+                assigned_gt_labels = torch.zeros(
+                    (anchors.shape[0]), dtype=torch.long) + num_classes
+                assigned_gt_labels[pos_flag] = gt_labels[assigned_gt_boxes[pos_flag]]
+                assigned_amibiguity = torch.ones((anchors.shape[0]), dtype=torch.long)
+                assigned_amibiguity[pos_flag] = 0
+                assigned_amibiguity[neg_flag] = 0
+
+                # assign anchor regressions
+                assigned_gt_reg = torch.zeros(
+                    (anchors.shape[0], 7))
+                assigned_gt_reg[pos_flag] = self.boxes_to_deltas(
+                    gt_boxes[assigned_gt_boxes[pos_flag]], anchors[pos_flag])
+
+                # assign anchor direction
+                assigned_gt_dir = torch.zeros(
+                    (anchors.shape[0]), dtype=torch.long)
+                assigned_gt_dir[pos_flag] = torch.clamp(torch.floor(self.limit_period(
+                    gt_boxes[assigned_gt_boxes[pos_flag], 6], 0, 2 * np.pi)).long(), 0, 1)
+
+                y, x, s, a, c = multiscale_anchors.shape
+                # s: number of scales, a: number of anchors, c: (x, y, z, w, l, h, θ)
+                multiscale_cls.append(assigned_gt_labels.reshape(y, x, 1, a))
+                multiscale_reg.append(assigned_gt_reg.reshape(y, x, 1, a, -1))
+                multiscale_dir.append(assigned_gt_dir.reshape(y, x, 1, a))
+                multiscale_ambiguity.append(assigned_amibiguity.reshape(y, x, 1, a))
+            batched_multiscale_cls.append(torch.cat(multiscale_cls, dim=-2).reshape(-1))
+            batched_multiscale_reg.append(torch.cat(multiscale_reg, dim=-3).reshape(-1, c))
+            batched_multiscale_dir.append(torch.cat(multiscale_dir, dim=-2).reshape(-1))
+            batched_multiscale_ambiguity.append(torch.cat(multiscale_ambiguity, dim=-2).reshape(-1))
+        anchor_match = {
+            'batched_cls': torch.stack(batched_multiscale_cls, dim=0),
+            'batched_reg': torch.stack(batched_multiscale_reg, dim=0),
+            'batched_dir': torch.stack(batched_multiscale_dir, dim=0),
+            'batched_ambiguity': torch.stack(batched_multiscale_ambiguity, dim=0)
+        }
+        return anchor_match

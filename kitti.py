@@ -24,6 +24,11 @@ class KITTIDataset(Dataset):
         self.mode = mode
         with open(os.path.join(root, f'dataset_{mode}_info.pkl'), 'rb') as f:
             self.dataset_info = pickle.load(f)
+        self.classes = {
+            'Pedestrian': 0,
+            'Cyclist': 1,
+            'Car': 2,
+        }
 
     def __getitem__(self, index):
         """
@@ -46,7 +51,7 @@ class KITTIDataset(Dataset):
         labels = frame_info['labels']
         gt_boxes = np.hstack((labels['location'], labels['dimensions'], np.reshape(labels['rotation_y'], (-1, 1))))
         gt_boxes = camera_to_lidar(gt_boxes, calib['Tr_velo_to_cam'], calib['R0_rect'])
-        gt_labels = labels['name']
+        gt_labels = np.array([self.classes.get(label, -1) for label in labels['name']])
 
         frame_dict = {
             'pointcloud': lidar_pc,
