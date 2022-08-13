@@ -5,7 +5,9 @@ from model import PointPillars
 from loss import PointPillarsLoss
 import torch
 from tqdm import tqdm
-
+import json
+import numpy as np
+import os
 
 def train_model(root, num_epochs, num_iters, batch_size):
     """
@@ -70,7 +72,7 @@ def train_model(root, num_epochs, num_iters, batch_size):
             cls_pred = cls_pred[batched_ambiguity == 0]
 
             loss_values = loss(cls_pred, reg_pred, dir_pred,
-                               batched_cls, batched_reg, batched_dir)
+                            batched_cls, batched_reg, batched_dir)
             # backward pass
             total_loss = loss_values['total_loss']
             total_loss.backward()

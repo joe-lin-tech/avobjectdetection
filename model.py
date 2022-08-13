@@ -6,6 +6,7 @@ from anchors import AnchorGenerator
 from tqdm import tqdm
 import random
 import sys
+import numpy as np
 
 
 class Voxelization(nn.Module):
@@ -145,7 +146,7 @@ class PillarEncoder(nn.Module):
         self.out_channels = out_channels
         self.conv = nn.Conv1d(in_channels, out_channels,
                               kernel_size=1, bias=False)
-        self.bn = nn.BatchNorm1d(out_channels)
+        self.bn = nn.BatchNorm1d(out_channels, eps=1e-3, momentum=0.01)
 
     def forward(self, batched_pillars, batched_pillar_coords, batched_num_points):
         """
@@ -276,21 +277,24 @@ class Backbone(nn.Module):
         self.deconv_block_1 = nn.Sequential(OrderedDict([
             ('deconvblock1_convtranspose', nn.ConvTranspose2d(
                 64, 128, kernel_size=1, stride=1)),
-            ('deconvblock1_bn', nn.BatchNorm2d(128)),
+            ('deconvblock1_bn', nn.BatchNorm2d(128, eps=1e-03, momentum=0.01)),
             ('deconvblock1_relu', nn.ReLU(inplace=True)),
         ]))
         self.deconv_block_2 = nn.Sequential(OrderedDict([
             ('deconvblock2_convtranspose', nn.ConvTranspose2d(
                 128, 128, kernel_size=2, stride=2)),
-            ('deconvblock2_bn', nn.BatchNorm2d(128)),
+            ('deconvblock2_bn', nn.BatchNorm2d(128, eps=1e-03, momentum=0.01)),
             ('deconvblock2_relu', nn.ReLU(inplace=True)),
         ]))
         self.deconv_block_3 = nn.Sequential(OrderedDict([
             ('deconvblock3_convtranspose', nn.ConvTranspose2d(
                 256, 128, kernel_size=4, stride=4)),
-            ('deconvblock3_bn', nn.BatchNorm2d(128)),
+            ('deconvblock3_bn', nn.BatchNorm2d(128, eps=1e-03, momentum=0.01)),
             ('deconvblock3_relu', nn.ReLU(inplace=True)),
         ]))
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d) or isinstance(m, nn.ConvTranspose2d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
 
     def forward(self, batched_pillar_features):
         """
@@ -339,10 +343,16 @@ class DetectionHead(nn.Module):
         self.in_channels = in_channels
         self.cls_conv = nn.Conv2d(
             self.in_channels, self.num_anchors * self.num_classes, kernel_size=1)
+        nn.init.normal_(self.cls_conv.weight, mean=0, std=0.01)
+        nn.init.constant_(self.cls_conv.bias, float(-np.log((1 - 0.01) / 0.01)))
         self.reg_conv = nn.Conv2d(
             self.in_channels, self.num_anchors * 7, kernel_size=1)
+        nn.init.normal_(self.reg_conv.weight, mean=0, std=0.01)
+        nn.init.constant_(self.reg_conv.bias, 0)
         self.dir_conv = nn.Conv2d(
             self.in_channels, self.num_anchors * 2, kernel_size=1)
+        nn.init.normal_(self.dir_conv.weight, mean=0, std=0.01)
+        nn.init.constant_(self.dir_conv.bias, 0)
 
     def forward(self, batched_backbone_features):
         """

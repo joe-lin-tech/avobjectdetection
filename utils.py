@@ -1,5 +1,6 @@
 import numpy as np
 import torch
+import numba
 
 def collate_fn(batch):
     """
@@ -36,3 +37,42 @@ def camera_to_lidar(boxes, Tr_velo_to_cam, R0_rect):
     location_pad = np.hstack((boxes[:, :3], np.ones((boxes.shape[0], 1))))
     transformed = location_pad @ (R0_rect @ Tr_velo_to_cam).T
     return np.hstack((transformed[..., :3], w[:, np.newaxis], l[:, np.newaxis], h[:, np.newaxis], r[:, np.newaxis]))
+
+# TODO understand function of the following function
+@numba.jit(nopython=True)
+def points_in_boxes(points, surfaces):
+    N, n = len(points), len(surfaces)
+    m = surfaces.shape[1]
+    masks = np.ones((N, n), dtype=np.bool_)
+    for i in range(N):
+        x, y, z = points[i, :3]
+        for j in range(n):
+            box_surface_params = surfaces[j]
+            for k in range(m):
+                a, b, c, d = box_surface_params[k]
+                if a * x + b * y + c * z + d >= 0:
+                    masks[i][j] = False
+                    break
+    return masks
+
+# TODO understand boxes to bev function
+def boxes_to_bev(boxes):
+    """
+    Transform 3D bounding boxes to bird's eye view
+    
+    Parameter boxes: 3D bounding boxes
+    Return: bird's eye view bounding boxes
+    """
+    centers, dimensions, angle = boxes[:, :2], boxes[:, 3:5], boxes[:, 6]
+
+    bev_corners = np.array([[-0.5, -0.5], [-0.5, 0.5], [0.5, 0.5], [0.5, -0.5]], dtype=np.float32)
+    bev_corners = bev_corners[None, ...] * dimensions[:, None, :]
+
+    sin_rotation, cos_rotation = np.sin(angle), np.cos(angle)
+
+    rotation_matrix = np.array([[cos_rotation, sin_rotation], [-sin_rotation, cos_rotation]])
+    rotation_matrix = np.transpose(rotation_matrix, (2, 1, 0))
+    bev_corners = bev_corners @ rotation_matrix
+
+    bev_corners += centers[:, None, :]
+    return bev_corners.astype(np.float32)

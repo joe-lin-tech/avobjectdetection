@@ -2,6 +2,8 @@ import os
 from tqdm import tqdm
 import numpy as np
 import pickle
+import cv2
+from utils import camera_to_lidar, points_in_boxes
 
 def process_calib(calib_path):
     """
@@ -33,6 +35,63 @@ def process_calib(calib_path):
     calib['Tr_velo_to_cam'] = np.vstack((Tr_velo_to_cam, np.array([0, 0, 0, 1])))
     calib['Tr_imu_to_velo'] = np.vstack((Tr_imu_to_velo, np.array([0, 0, 0, 1])))
     return calib
+
+def process_lidar(velodyne_path, R0_rect, Tr_velo_to_cam, P2, image_shape):
+    """
+    Process the velodyne point cloud for a frame
+
+    Parameter velodyne_path: path to the velodyne point cloud
+    Parameter R0_rect: rotation matrix from rectified camera to velodyne
+    Parameter Tr_velo_to_cam: transformation matrix from velodyne to camera
+    Parameter P2: projection matrix for the second camera
+    Parameter img_shape: shape of the image
+    Return: a numpy array containing the processed point cloud
+    """
+    lidar_pc = np.reshape(np.fromfile(velodyne_path, dtype=np.float32), (-1, 4))
+
+    # TODO figure out the following projection matrix to CRT kitti functionality
+    CR = P2[0:3, 0:3]
+    CT = P2[0:3, 3]
+    R_inv_C_inv = np.linalg.inv(CR)
+    R_inv, C_inv = np.linalg.qr(R_inv_C_inv)
+    C = np.linalg.inv(C_inv)
+    R = np.linalg.inv(R_inv)
+    T = C_inv @ CT
+
+    image_box = [0, 0, image_shape[1], image_shape[0]]
+
+    # TODO understand frustum retrieving function
+    fku, fkv = C[0, 0], -C[1, 1]
+    u0_v0 = C[0:2, 2]
+    near_clip, far_clip = 0.001, 100
+    z_points = np.array([near_clip] * 4 + [far_clip] * 4, dtype=C.dtype)[:, np.newaxis]
+    box_corners = np.array([[image_box[0], image_box[1]], [image_box[0], image_box[3]], [image_box[2], image_box[3]], [image_box[2], image_box[1]]], dtype=C.dtype)
+    near_box_corners = (box_corners - u0_v0) / np.array([fku / near_clip, -fkv / near_clip], dtype=C.dtype)
+    far_box_corners = (box_corners - u0_v0) / np.array([fku / far_clip, -fkv / far_clip], dtype=C.dtype)
+    ret_xy = np.concatenate([near_box_corners, far_box_corners], axis=0)
+    frustum = np.concatenate([ret_xy, z_points], axis=1)
+    frustum -= T
+    frustum = np.linalg.inv(R) @ frustum.T
+    extended_xyz = np.pad(frustum.T[None, ...], ((0, 0), (0, 0), (0, 1)), 'constant', constant_values=1.0)
+    rt_mat = np.linalg.inv(R0_rect @ Tr_velo_to_cam)
+    xyz = extended_xyz @ rt_mat.T
+    frustum = xyz[..., :3]
+    rect1 = np.stack([frustum[:, 0], frustum[:, 1], frustum[:, 3], frustum[:, 2]], axis=1)
+    rect2 = np.stack([frustum[:, 4], frustum[:, 7], frustum[:, 6], frustum[:, 5]], axis=1)
+    rect3 = np.stack([frustum[:, 0], frustum[:, 4], frustum[:, 5], frustum[:, 1]], axis=1)
+    rect4 = np.stack([frustum[:, 2], frustum[:, 6], frustum[:, 7], frustum[:, 3]], axis=1)
+    rect5 = np.stack([frustum[:, 1], frustum[:, 5], frustum[:, 6], frustum[:, 2]], axis=1)
+    rect6 = np.stack([frustum[:, 0], frustum[:, 3], frustum[:, 7], frustum[:, 4]], axis=1)
+    group_vertices = np.stack([rect1, rect2, rect3, rect4, rect5, rect6], axis=1)
+
+    # TODO understand the plane equation's function
+    vectors = group_vertices[:, :, :2] - group_vertices[:, :, 1:3]
+    normal_vectors = np.cross(vectors[:, :, 0], vectors[:, :, 1])
+    normal_d = np.einsum('ijk,ijk->ij', group_vertices[:, :, 0], normal_vectors)
+    frustum_surfaces = np.concatenate([normal_vectors, -normal_d[:, :, None]], axis=-1)
+    indices = points_in_boxes(lidar_pc[:, :3], frustum_surfaces)
+    reduced_lidar_pc = lidar_pc[indices.reshape([-1])]
+    return reduced_lidar_pc
 
 def process_labels(label_path):
     """
@@ -83,12 +142,20 @@ def generate_dataset_info(root, mode):
         calib_path = os.path.join(root, mode, 'calib', id + '.txt')
         labels_path = os.path.join(root, mode, 'labels', id + '.txt')
 
-        frame_info['image_path'] = image_path
         frame_info['velodyne_path'] = velodyne_path
         frame_info['calib'] = process_calib(calib_path)
         
-        lidar_pc = np.reshape(np.fromfile(velodyne_path, dtype=np.float32), (-1, 4))
-        # TODO remove lidar points that are outside of camera view
+        image = cv2.imread(image_path)
+        image_shape = image.shape[:2]
+        frame_info['image'] = {
+            'image_shape': image_shape,
+            'image_path': image_path,
+        }
+
+        reduced_lidar_pc = process_lidar(velodyne_path, frame_info['calib']['R0_rect'], frame_info['calib']['Tr_velo_to_cam'], frame_info['calib']['P2'], image_shape)
+        velodyne_reduced_path = os.path.join(root, mode, 'velodyne_reduced', id + '.bin')
+        with open(velodyne_reduced_path, 'w') as f:
+            reduced_lidar_pc.tofile(f)
 
         labels = process_labels(labels_path)
         frame_info['labels'] = labels
@@ -96,4 +163,8 @@ def generate_dataset_info(root, mode):
     with open(os.path.join(root, f'dataset_{mode}_info.pkl'), 'wb') as f:
         pickle.dump(dataset_info, f)
     return dataset_info
-    
+
+if __name__ == "__main__":
+    root = '/Volumes/G-DRIVE mobile/kitti'
+    mode = 'training'
+    generate_dataset_info(root, mode)

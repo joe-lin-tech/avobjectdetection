@@ -1,7 +1,7 @@
 import torch
 from tqdm import tqdm
 import numpy as np
-
+import json
 
 class AnchorGenerator():
     """
@@ -50,7 +50,7 @@ class AnchorGenerator():
         tiled_centers_x = torch.tile(centers_x, (self.batch_size, 1, 1, 1, 1))
         tiled_centers_y = torch.tile(centers_y, (self.batch_size, 1, 1, 1, 1))
         tiled_centers_z = torch.ones_like(
-            tiled_centers_x) * ((anchor_range[5] - anchor_range[2]) / 2)
+            tiled_centers_x) * ((anchor_range[5] + anchor_range[2]) / 2)
         tiled_widths = torch.ones_like(tiled_centers_x) * anchor_size[0]
         tiled_lengths = torch.ones_like(tiled_centers_x) * anchor_size[1]
         tiled_heights = torch.ones_like(tiled_centers_x) * anchor_size[2]
@@ -94,12 +94,12 @@ class AnchorGenerator():
         boxes_bev = boxes[:, [0, 1, 3, 4]]
         boxes_θ = self.limit_period(boxes[:, 6], 0.5, np.pi)
         boxes_bev = torch.where(
-            torch.abs(boxes_θ[:, None]) < np.pi / 4, boxes_bev, boxes_bev[:, [0, 1, 3, 2]])
+            torch.abs(boxes_θ[:, None]) <= np.pi / 4, boxes_bev, boxes_bev[:, [0, 1, 3, 2]])
 
         boxes_xy = boxes_bev[:, :2]
         boxes_wl = boxes_bev[:, 2:]
         boxes_bev = torch.cat(
-            [boxes_xy - boxes_wl / 2, boxes_xy + boxes_wl / 2], dim=1)
+            [boxes_xy - boxes_wl / 2, boxes_xy + boxes_wl / 2], dim=-1)
         return boxes_bev
 
     def bev_iou(self, boxes1, boxes2):
@@ -128,9 +128,15 @@ class AnchorGenerator():
             (boxes1[:, 3] - boxes1[:, 1])
         boxes2_area = (boxes2[:, 2] - boxes2[:, 0]) * \
             (boxes2[:, 3] - boxes2[:, 1])
-        # boxes1_area, boxes2_area: (M, )
+        # boxes1_area, boxes2_area: (N, ), (M, )
 
-        return boxes_area / (boxes1_area[:, None] + boxes2_area[None, :] - boxes_area)
+        with open("boxes1.json", "w") as f:
+            json.dump(boxes1.tolist(), f)
+        
+        with open("boxes2.json", "w") as f:
+            json.dump(boxes2.tolist(), f)
+
+        return boxes_area / (boxes1_area[:, None] + boxes2_area[None, :] - boxes_area + 1e-8)
 
     def boxes_to_bev_iou(self, boxes, anchors):
         """
@@ -194,6 +200,7 @@ class AnchorGenerator():
                 pos_iou, neg_iou = threshold['pos_iou_thres'], threshold['neg_iou_thres']
                 anchors = multiscale_anchors[:, :, i, :, :].reshape(-1, 7)
                 bev_iou = self.boxes_to_bev_iou(gt_boxes, anchors)
+    
                 max_anchor_iou, max_anchor_iou_idx = torch.max(bev_iou, dim=0)
                 max_gt_iou, _ = torch.max(bev_iou, dim=1)
 

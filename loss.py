@@ -35,7 +35,6 @@ class PointPillarsLoss(nn.Module):
         # classification loss
         # create one hot encoding of ground truth labels with num_classes + 1
         num_cls_pos = (batched_cls < 3).sum()
-        print(num_cls_pos)
         batched_cls = F.one_hot(batched_cls, num_classes=4)[:, :3].float()
         cls_sigmoid = torch.sigmoid(cls_pred)
         cls_weights = self.alpha * (1 - cls_sigmoid).pow(self.gamma) * batched_cls + \
